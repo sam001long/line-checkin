@@ -1,1 +1,211 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>報到處｜Check-in</title>
+  <style>
+    :root { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans TC", "PingFang TC", "Heiti TC", "Microsoft JhengHei", system-ui, sans-serif; }
+    body { margin: 0; padding: 24px; background: #0b0f14; color: #eef3f8; }
+    .card { max-width: 560px; margin: 0 auto; background: #141a21; border: 1px solid #26313d; border-radius: 16px; padding: 20px; box-shadow: 0 6px 24px rgba(0,0,0,.35); }
+    h1 { margin: 0 0 4px; font-size: 20px; letter-spacing: .5px; }
+    .sub { color: #a5b4c4; font-size: 13px; margin-bottom: 18px; }
+    label { display:block; font-size: 13px; color:#c9d6e3; margin: 12px 0 6px; }
+    input { width: 100%; padding: 12px 14px; background: #0f141a; color:#e8f0f7; border:1px solid #2b3846; border-radius: 12px; outline: none; font-size: 16px; }
+    input:focus { border-color:#5aa6ff; box-shadow: 0 0 0 3px rgba(90,166,255,.15); }
+    .row { display:flex; gap: 10px; }
+    .row > div { flex:1; }
+    .btn { width:100%; border:0; padding: 12px 16px; border-radius: 12px; margin-top: 16px; font-size: 16px; font-weight:600; background: linear-gradient(135deg,#3ddc97,#1fb6ff); color: #071017; cursor:pointer; }
+    .btn[disabled] { opacity:.6; cursor: not-allowed; }
+    .muted { color:#9bb0c7; font-size: 12px; }
+    .divider { height:1px; background: #243140; margin: 16px 0; }
+    .pill { display:inline-block; padding: 4px 10px; border-radius: 999px; background:#1e2732; border:1px solid #2b3846; color:#bcd0e6; font-size:12px; }
+    .toolbar { display:flex; justify-content: space-between; align-items: center; gap: 8px; margin-top: 10px; }
+    .linklike { background:none; border:0; color:#77baff; text-decoration: underline; cursor:pointer; font-size:13px; padding: 6px 0; }
+    .list { display:grid; gap:8px; }
+    .item { padding: 10px; border:1px solid #273545; background:#10161c; border-radius: 12px; }
+    .item b { color:#eaf2fb; }
+    .toast { position: fixed; left:50%; transform: translateX(-50%); bottom: 18px; background: #0f141a; border: 1px solid #2b3846; color:#eaf2fb; padding: 10px 14px; border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,.35); display:none; }
+    .hint { font-size:12px; color:#9bb0c7; margin-top: 8px; }
+    .danger { color:#ff9ea6; }
+    .ok { color:#9ef7c0; }
+    .small { font-size:12px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>報到處</h1>
+    <div class="sub">輸入你的姓名與員工編號，點「確認報到」。此頁會記住你的資料（同一台手機）。</div>
 
+    <div class="row">
+      <div>
+        <label for="name">姓名</label>
+        <input id="name" placeholder="例如：王小明" autocomplete="name" />
+      </div>
+      <div>
+        <label for="empId">員工編號</label>
+        <input id="empId" placeholder="例如：A12345" inputmode="text" />
+      </div>
+    </div>
+
+    <button id="submitBtn" class="btn">確認報到</button>
+
+    <div class="toolbar">
+      <div class="pill" id="statusPill">尚未送出</div>
+      <button id="clearBtn" class="linklike">清除本機記憶</button>
+    </div>
+
+    <div class="divider"></div>
+
+    <div class="muted small">最近報到紀錄（此帳號）</div>
+    <div id="history" class="list" aria-live="polite"></div>
+    <div class="hint">＊若看不到紀錄，依然會寫入雲端表單；可點右上角「⋯」→ 於外部開啟，或換個網路再試。</div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script>
+    // === 設定區 ===
+    // 部署完成後，填入你的 Google Apps Script 網址（以 /exec 結尾）
+    const GAS_URL = "https://script.google.com/macros/s/AKfycbxNwX9YTZbuJRMEFIqdRIcZmQ_U2x314MetPgdXjvVZwelY2Z2hcSc7Aj-VbXH37cvr/exec";
+
+    // === 程式 ===
+    const $ = (sel) => document.querySelector(sel);
+    const elName = $("#name");
+    const elEmp = $("#empId");
+    const elBtn = $("#submitBtn");
+    const elToast = $("#toast");
+    const elStatus = $("#statusPill");
+    const elHistory = $("#history");
+    const elClear = $("#clearBtn");
+
+    const STORAGE_KEY = "checkin:v1";
+    const saveLocal = (name, empId) => {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ name, empId }));
+    };
+    const readLocal = () => {
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        if (!raw) return null;
+        return JSON.parse(raw);
+      } catch(e) { return null; }
+    };
+    const showToast = (msg) => {
+      elToast.textContent = msg;
+      elToast.style.display = "block";
+      setTimeout(() => { elToast.style.display = "none"; }, 1800);
+    };
+    const setStatus = (text, ok=false) => {
+      elStatus.textContent = text;
+      elStatus.classList.toggle("ok", ok);
+      elStatus.classList.toggle("danger", !ok);
+    };
+
+    function fmt(ts) {
+      try {
+        const d = new Date(ts);
+        return d.toLocaleString('zh-TW', { hour12:false });
+      } catch(e) { return String(ts); }
+    }
+
+    async function submitCheckin() {
+      const name = elName.value.trim();
+      const empId = elEmp.value.trim();
+      if (!name || !empId) {
+        showToast("請填姓名與員工編號");
+        setStatus("缺少必填欄位", false);
+        return;
+      }
+
+      elBtn.disabled = true;
+      setStatus("送出中…");
+
+      try {
+        // 使用 x-www-form-urlencoded 以避免 CORS 預檢
+        const body = new URLSearchParams({
+          action: "checkin",
+          name, empId,
+          ua: navigator.userAgent,
+          ts: Date.now().toString()
+        }).toString();
+
+        const res = await fetch(GAS_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
+          body
+        });
+
+        // 不使用 no-cors，保留可讀回應
+        const data = await res.json();
+        if (data && data.ok) {
+          saveLocal(name, empId);
+          setStatus("已報到 " + fmt(data.savedAt), true);
+          showToast("✅ 報到成功");
+          loadHistory(); // 重新載入紀錄
+        } else {
+          throw new Error(data && data.error ? data.error : "未知錯誤");
+        }
+      } catch (err) {
+        console.error(err);
+        setStatus("送出失敗", false);
+        showToast("送出失敗，請稍後再試");
+      } finally {
+        elBtn.disabled = false;
+      }
+    }
+
+    async function loadHistory() {
+      const empId = elEmp.value.trim();
+      if (!empId) { elHistory.innerHTML = ""; return; }
+      try {
+        const url = new URL(GAS_URL);
+        url.searchParams.set("action", "history");
+        url.searchParams.set("empId", empId);
+        url.searchParams.set("limit", "5");
+        const res = await fetch(url.toString(), { method: "GET" });
+        const data = await res.json();
+        if (!data || !data.ok) throw new Error("history failed");
+        const rows = data.rows || [];
+        if (!rows.length) {
+          elHistory.innerHTML = '<div class="item">尚無紀錄</div>';
+          return;
+        }
+        elHistory.innerHTML = rows.map(r => {
+          const t = fmt(r.timestamp || r.savedAt || r.ts);
+          const n = (r.name || "").replace(/[<>&]/g,'');
+          const e = (r.empId || "").replace(/[<>&]/g,'');
+          return `<div class="item"><b>${t}</b><div class="small muted">姓名：${n}｜員編：${e}</div></div>`;
+        }).join("");
+      } catch (e) {
+        console.error(e);
+        elHistory.innerHTML = '<div class="item">（暫時讀不到雲端紀錄）</div>';
+      }
+    }
+
+    // 初始化：帶入本機記憶並載入歷史
+    window.addEventListener("DOMContentLoaded", () => {
+      const saved = readLocal();
+      if (saved) {
+        if (saved.name) elName.value = saved.name;
+        if (saved.empId) elEmp.value = saved.empId;
+        setStatus("已記住姓名/員編", true);
+      } else {
+        setStatus("尚未送出", false);
+      }
+      loadHistory();
+    });
+
+    elName.addEventListener("change", () => saveLocal(elName.value.trim(), elEmp.value.trim()));
+    elEmp.addEventListener("change", () => { saveLocal(elName.value.trim(), elEmp.value.trim()); loadHistory(); });
+    elBtn.addEventListener("click", submitCheckin);
+    elClear.addEventListener("click", () => {
+      localStorage.removeItem(STORAGE_KEY);
+      elName.value = "";
+      elEmp.value = "";
+      elHistory.innerHTML = "";
+      setStatus("已清除本機記憶");
+      showToast("已清除本機記憶");
+    });
+  </script>
+</body>
+</html>
